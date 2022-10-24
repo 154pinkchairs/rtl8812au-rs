@@ -152,7 +152,7 @@ static void update_BCNTIM(_adapter *padapter)
 			if(pbackup_remainder_ie && premainder_ie)
 				_rtw_memcpy(pbackup_remainder_ie, premainder_ie, remainder_ielen);
 		}		
-		
+		//
 		*dst_ie++=_TIM_IE_;
 
 		if((pstapriv->tim_bitmap&0xff00) && (pstapriv->tim_bitmap&0x00fe))			
@@ -202,7 +202,6 @@ static void update_BCNTIM(_adapter *padapter)
 		pnetwork_mlmeext->IELength = offset + remainder_ielen;
 	
 	}
-
 #ifndef CONFIG_INTERRUPT_BASED_TXBCN 
 #if defined(CONFIG_USB_HCI) || defined(CONFIG_SDIO_HCI) || defined(CONFIG_GSPI_HCI)
 	set_tx_beacon_cmd(padapter);
