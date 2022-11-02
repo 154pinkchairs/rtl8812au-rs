@@ -29,13 +29,12 @@ use core::slice::from_raw_parts;
 use core::slice::from_raw_parts_mut;
 
 
-if CONFIG_AP_MODE {
+#[cfg(CONFIG_AP_MODE)]
 	pub static mut RTW_WPA_OUI: [u8; 4] = [0x00, 0x50, 0xf2, 0x01];
 	pub static mut WMM_OUI: [u8; 4] = [0x00, 0x50, 0xf2, 0x02];
 	pub static mut WPS_OUI: [u8; 4] = [0x00, 0x50, 0xf2, 0x04];
 	pub static mut P2P_OUI: [u8; 4] = [0x50, 0x6f, 0x9a, 0x09];
 	pub static mut WFD_OUI: [u8; 4] = [0x50, 0x6f, 0x9a, 0x0a];
-}
 
 pub fn init_mlme_ap_info(padapter: &mut Adapter) {
 	let pmlmeext = &mut padapter.mlmeextpriv;
@@ -168,28 +167,35 @@ pub fn update_BCNTIM(padapter: &mut Adapter) {
 			}
 			_rtw_memcpy(pbackup_remainder_ie, premainder_ie, remainder_ielen);
 		}
-		//append TIM IE
-		*dst_ie++ = _TIM_IE_;
+		*dst_ie = _TIM_IE_;
 
-		if tim_ielen == 4 {
-			*dst_ie++ = 3;
-			*dst_ie++ = 0;
-			*dst_ie++ = 1;
-			*dst_ie++ = (u8)tim_bitmap_le;
-		} else if tim_ielen == 5 {
-			*dst_ie++ = 4;
-			*dst_ie++ = 0;
-			*dst_ie++ = 1;
-			_rtw_memcpy(dst_ie, &tim_bitmap_le, 2);
-			dst_ie = dst_ie.offset(2);
-		}
-
-		if pstapriv.tim_bitmap & BIT(0) {
-			//bc/mc packets
-			*dst_ie++ = pstapriv.tim_bitmap >> 1;
+		if (pstapriv.tim_bitmap & 0xff00) != 0 && (pstapriv.tim_bitmap & 0x00fe) != 0 {
+			tim_ielen = 5;
 		} else {
-			//bc/mc packets
-			*dst_ie++ = pstapriv.tim_bitmap >> 0;
+			tim_ielen = 4;
+		}
+		dst_ie = dst_ie.offset(1);
+		*dst_ie = tim_ielen as u8;
+
+		if (pstapriv.tim_bitmap & BIT(0)) != 0 {
+			//for bc/mc frames
+			*dst_ie = BIT(0); //bitmap ctrl
+		} else {
+			*dst_ie = 0;
+		}
+		if tim_ielen == 4 {
+			let mut pvb: u8 = 0;
+			if (pstapriv.tim_bitmap & 0x00fe) != 0 {
+				pvb = tim_bitmap_le as u8;
+			} else if (pstapriv.tim_bitmap & 0xff00) != 0 {
+				pvb = (tim_bitmap_le >> 8) as u8;
+			} else {
+				pvb = tim_bitmap_le as u8;
+			}
+			*dst_ie = pvb;
+		} else if tim_ielen == 5 {
+			_rtw_memcpy(dst_ie as *mut u8, &tim_bitmap_le as *const u16 as *const u8, 2);
+			dst_ie = dst_ie.offset(2);
 		}
 
 		//copy remainder IE
@@ -330,11 +336,17 @@ pub fn chk_sta_is_alive(psta: &mut sta_info) -> u8 {
 
 	//if(sta_last_rx_pkts(psta) == sta_rx_pkts(psta))
 	if (psta.sta_stats.last_rx_data_pkts + psta.sta_stats.last_rx_ctrl_pkts) == (psta.sta_stats.rx_data_pkts + psta.sta_stats.rx_ctrl_pkts) {
+		/*port from C, using conditional compilation 
 		#if 0
 		if(psta->state&WIFI_SLEEP_STATE)
 			ret = _TRUE;
 		#endif
 	} else {
+		ret = _TRUE;
+	}
+	*/
+	#[cfg(not(feature = "CONFIG_LPS"))]
+	{
 		ret = _TRUE;
 	}
 
@@ -343,111 +355,207 @@ pub fn chk_sta_is_alive(psta: &mut sta_info) -> u8 {
 	ret
 }
 
-void rtw_ap_expire_timeout_chk(_adapter *padapter)
-{
-	struct sta_info *psta;
-	_irqL irqL;
-	_list	*phead, *plist;
-	struct sta_priv *pstapriv = &padapter->stapriv;
-	struct mlme_priv *pmlmepriv = &padapter->mlmepriv;
-	u8 updated = _FALSE;
-	int i;
-	u8 chk_alive_list[NUM_STA];
-	int chk_alive_num = 0;
+pub fn rtw_ap_expire_timeout_chk(padapter: &mut Adapter) {
+		let mut psta: *mut sta_info = ptr::null_mut();
+		let mut phead: *mut list_head = ptr::null_mut();
+		let mut plist: *mut list_head = ptr::null_mut();
+		let mut pstapriv = &mut padapter.stapriv;
+		let mut pmlmepriv = &mut padapter.mlmepriv;
+		let mut updated: u8 = _FALSE;
+		let mut i: i32 = 0;
+		let mut chk_alive_list: [u8; NUM_STA] = [0; NUM_STA];
+		let mut chk_alive_num: i32 = 0;
 
-	if (check_fwstate(pmlmepriv, WIFI_AP_STATE) == _FALSE)
-		return;
+		if check_fwstate(pmlmepriv, WIFI_AP_STATE) == _FALSE {
+			return;
+		}
 
-	_enter_critical_bh(&pstapriv->asoc_list_lock, &irqL);
+		_enter_critical_bh(&mut pstapriv.asoc_list_lock, &mut irqL);
 
-	phead = &pstapriv->asoc_list;
-	plist = get_next(phead);
+		phead = &mut pstapriv.asoc_list;
+		plist = get_next(phead);
+		#[cfg(DBG_EXPIRATION_CHK)]
+		{
+			if rtw_end_of_queue_search(phead, plist) == _TRUE {
+				DBG_871X("asoc_list empty\n");
+			} else {
+				DBG_871X("asoc_list len = %d\n", pstapriv.asoc_list_cnt);}
+		}
+	}
 
-	/* check asoc_queue */
-	while ((rtw_end_of_queue_search(phead, plist)) == _FALSE)
-	{
-		psta = LIST_CONTAINOR(plist, struct sta_info, asoc_list);
-
+	while rtw_end_of_queue_search(phead, plist) == _FALSE {
+		psta = container_of!(plist, sta_info, auth_list);
 		plist = get_next(plist);
 
-		if (psta->expire_to > 0)
-		{
-			psta->expire_to--;
-			if (psta->expire_to > 0)
-				continue;
-		}
+		if psta.expire_to > 0 {
+			psta.expire_to -= 1;
+			if psta.expire_to == 0 {
+				rtw_list_delete(&psta.auth_list);
+				pstapriv.auth_list_cnt -= 1;
 
-		rtw_list_delete(&psta->asoc_list);
-		pstapriv->asoc_list_cnt--;
+				DBG_871X("auth expire %02X%02X%02X%02X%02X%02X\n",
+					psta.hwaddr[0],psta.hwaddr[1],psta.hwaddr[2],psta.hwaddr[3],psta.hwaddr[4],psta.hwaddr[5]);
 
-		DBG_871X("asoc expire "MAC_FMT", state=0x%x\n", MAC_ARG(psta->hwaddr), psta->state);
-		updated = ap_free_sta(padapter, psta, _FALSE, WLAN_REASON_DEAUTH_LEAVING);
+				_exit_critical_bh(&mut pstapriv.auth_list_lock, &mut irqL);
 
-	}
-	else {
-		if (psta->sleepq_len > 0) {
-			if (padapter->xmitpriv.free_xmitframe_cnt > (NR_XMITFRAME/pstapriv->asoc_list_cnt) &&
-				pstapriv->asoc_list_cnt < (NUM_STA - 4)
-			){
-				DBG_871X("%s sta:"MAC_FMT", sleepq_len:%u, free_xmitframe_cnt:%u, asoc_list_cnt:%u, clear sleep_q\n", __func__
-					, MAC_ARG(psta->hwaddr)
-					, psta->sleepq_len, padapter->xmitpriv.free_xmitframe_cnt, pstapriv->asoc_list_cnt);
-				wakeup_sta_to_xmit(padapter, psta);
+				_enter_critical_bh(&mut pstapriv.sta_hash_lock, &mut irqL);
+				rtw_free_stainfo(padapter, psta);
+				_exit_critical_bh(&mut pstapriv.sta_hash_lock, &mut irqL);
+
+				_enter_critical_bh(&mut pstapriv.auth_list_lock, &mut irqL);
 			}
 		}
 	}
 
-	_exit_critical_bh(&pstapriv->asoc_list_lock, &irqL);
+	_exit_critical_bh(&mut pstapriv.asoc_list_lock, &mut irqL);
 
-	associated_clients_update(padapter, updated);
-}
-#[cfg(CONFIG_ACTIVE_KEEP_ALIVE_CHECK)]
-if chk_alive_num {
-	backup_oper_channel = rtw_get_oper_ch(padapter);
-	if (backup_oper_channel != pmlmeext->cur_channel) {
-		SelectChannel(padapter, pmlmeext->cur_channel);
+	psta = ptr::null_mut();
+
+	_enter_critical_bh(&mut pstapriv.asoc_list_lock, &mut irqL);
+
+	phead = &mut pstapriv.asoc_list;
+	plist = get_next(phead);
+
+#[cfg(DBG_EXPIRATION_CHK)]{
+	if rtw_end_of_queue_search(phead, plist) == _TRUE {
+		DBG_871X("asoc_list empty\n");
+	} else {
+		DBG_871X("asoc_list len = %d\n", pstapriv.asoc_list_cnt);
 	}
+}
+/*port from C to Rust: 
+*/
+	psta = container_of!(plist, sta_info, asoc_list);
+	plist = get_next(plist);
 
-	/* issue null data to check sta alive*/
-	for (i = 0; i < chk_alive_num; i++) {
-		
-		int ret = _FAIL;
-
-		psta = rtw_get_stainfo_by_offset(pstapriv, chk_alive_list[i]);
-		if(!(psta->state &_FW_LINKED))
-			continue;		
-	
-		if (psta->state & WIFI_SLEEP_STATE)
-			ret = issue_nulldata(padapter, psta->hwaddr, 0, 1, 50);
-		else
-			ret = issue_nulldata(padapter, psta->hwaddr, 0, 3, 50);
-
-		psta->keep_alive_trycnt++;
-		if (ret == _SUCCESS)
-		{
-			DBG_871X("asoc check, sta(" MAC_FMT ") is alive\n", MAC_ARG(psta->hwaddr));
-			psta->expire_to = pstapriv->expire_to;
-			psta->keep_alive_trycnt = 0;
+	#[cfg(feature = "CONFIG_AUTO_AP_MODE")]
+	{
+		if psta.isrc {
 			continue;
 		}
-		else if (psta->keep_alive_trycnt < 3)
+	}
+
+	
+
+
+	if chk_sta_is_alive(psta) == _TRUE || psta.expire_to == 0 {
+		psta.expire_to = pstapriv.expire_to;
+		psta.keep_alive_trycnt = 0;
+		#[cfg(feature = "CONFIG_TX_MCAST2UNI")]
 		{
-			DBG_871X("ack check for asoc expire, keep_alive_trycnt=%d\n", psta->keep_alive_trycnt);
-			_enter_critical_bh(&pstapriv->asoc_list_lock, &irqL);
-			if (rtw_is_list_empty(&psta->asoc_list)==_FALSE) {
-				rtw_list_delete(&psta->asoc_list);
-				pstapriv->asoc_list_cnt--;
-				updated = ap_free_sta(padapter, psta, _FALSE, WLAN_REASON_DEAUTH_LEAVING);
-			}
-			_exit_critical_bh(&pstapriv->asoc_list_lock, &irqL);
-
-			associated_clients_update(padapter, updated);
+			psta.under_exist_checking = 0;
 		}
+	} else {
+		psta.expire_to -= 1;
+	}
 
-		if backup_oper_channel > 0 /* back to the original operation channel */
-			SelectChannel(padapter, backup_oper_channel);
-	associated_clients_update(padapter, updated);
+#[cfg(not (feature = "CONFIG_ACTIVE_KEEP_ALIVE_CHECK"))]
+{
+	#[cfg(feature = "CONFIG_TX_MCAST2UNI")]
+	{
+		#[cfg(feature = "CONFIG_80211N_HT")]
+		{
+			if (psta.flags & WLAN_STA_HT) != 0 && (psta.htpriv.agg_enable_bitmap != 0 || psta.under_exist_checking != 0) {
+				// check sta by delba(addba) for 11n STA
+				if psta.expire_to <= (pstapriv.expire_to - 50) {
+					DBG_871X("asoc expire by DELBA/ADDBA! (%d s)", (pstapriv.expire_to - psta.expire_to) * 2);
+					psta.under_exist_checking = 0;
+					psta.expire_to = 0;
+				} else if psta.expire_to <= (pstapriv.expire_to - 3) && psta.under_exist_checking == 0 {
+					DBG_871X("asoc check by DELBA/ADDBA! (%d s)", (pstapriv.expire_to - psta.expire_to) * 2);
+					psta.under_exist_checking = 1;
+					//tear down TX AMPDU
+					send_delba(padapter, 1, psta.hwaddr);
+					psta.htpriv.agg_enable_bitmap = 0x0;
+					psta.htpriv.candidate_tid_bitmap = 0x0;
+				}
+			}
+		}
+	}
+}
+if psta.expire_to <= 0 {
+	#[cfg(feature = "CONFIG_ACTIVE_KEEP_ALIVE_CHECK")]{
+		if padapter.registrypriv.wifi_spec == 1 {
+			psta.expire_to = pstapriv.expire_to;
+			continue;
+		}
+		if (psta.state & WIFI_SLEEP_STATE) != 0 && (psta.state & WIFI_STA_ALIVE_CHK_STATE) == 0 {
+			psta.expire_to = pstapriv.expire_to;
+			psta.state |= WIFI_STA_ALIVE_CHK_STATE;
+			pstapriv.tim_bitmap |= BIT(psta.aid);
+			update_beacon(padapter, _TIM_IE_, None, _FALSE);
+			if !padapter.mlmeextpriv.active_keep_alive_check {
+				continue;
+			}
+		}
+	}
+
+rtw_list_delete(&psta.asoc_list);
+pstapriv.asoc_list_cnt -= 1;
+DBG_871X(r#"asoc expire "MAC_FMT", state=0x%x"#, MAC_ARG(psta.hwaddr), psta.state);
+updated = ap_free_sta(padapter, psta, _FALSE, WLAN_REASON_DEAUTH_LEAVING);
+} else {
+	if psta.sleepq_len > (NR_XMITFRAME / pstapriv.asoc_list_cnt) && padapter.xmitpriv.free_xmitframe_cnt < ((NR_XMITFRAME / pstapriv.asoc_list_cnt) / 2) {
+		DBG_871X(r#"%s sta:"MAC_FMT", sleepq_len:%u, free_xmitframe_cnt:%u, asoc_list_cnt:%u, clear sleep_q"#, __func__, MAC_ARG(psta.hwaddr), psta.sleepq_len, padapter.xmitpriv.free_xmitframe_cnt, pstapriv.asoc_list_cnt);
+		wakeup_sta_to_xmit(padapter, psta);
+	}
+}
+_exit_critical_bh(&mut pstapriv.asoc_list_lock, &mut irqL);
+#[cfg(feature = "CONFIG_ACTIVE_KEEP_ALIVE_CHECK")]
+{
+	if chk_alive_num {
+		let backup_oper_channel = 0;
+		let pmlmeext = &padapter.mlmeextpriv;
+		/* switch to correct channel of current network  before issue keep-alive frames */
+		if rtw_get_oper_ch(padapter) != pmlmeext.cur_channel {
+			backup_oper_channel = rtw_get_oper_ch(padapter);
+			SelectChannel(padapter, pmlmeext.cur_channel);
+		}
+	}
+
+/*
+issue null data to check sta alive.
+*/
+
+
+	for chk_alive_num in 0..chk_alive_num {
+		let psta = rtw_get_stainfo_by_offset(pstapriv, chk_alive_list[chk_alive_num]);
+		if (psta.state & _FW_LINKED) == 0 {
+			continue;
+		}
+		let ret = if (psta.state & WIFI_SLEEP_STATE) != 0 {
+			issue_nulldata(padapter, psta.hwaddr, 0, 1, 50)
+		} else {
+			issue_nulldata(padapter, psta.hwaddr, 0, 3, 50)
+		};
+		psta.keep_alive_trycnt += 1;
+		if ret == _SUCCESS {
+			DBG_871X(r#"asoc check, sta("MAC_FMT") is alive"#, MAC_ARG(psta.hwaddr));
+			psta.expire_to = pstapriv.expire_to;
+			psta.keep_alive_trycnt = 0;
+			continue;
+		} else if psta.keep_alive_trycnt <= 3 {
+			DBG_871X(r#"ack check for asoc expire, keep_alive_trycnt=%d"#, psta.keep_alive_trycnt);
+			psta.expire_to = 1;
+			continue;
+		}
+		psta.keep_alive_trycnt = 0;
+		DBG_871X(r#"asoc expire "MAC_FMT", state=0x%x"#, MAC_ARG(psta.hwaddr), psta.state);
+		_enter_critical_bh(&mut pstapriv.asoc_list_lock, &mut irqL);
+		if !rtw_is_list_empty(&psta.asoc_list) {
+			rtw_list_delete(&psta.asoc_list);
+			pstapriv.asoc_list_cnt -= 1;
+			updated = ap_free_sta(padapter, psta, _FALSE, WLAN_REASON_DEAUTH_LEAVING);
+		}
+		_exit_critical_bh(&mut pstapriv.asoc_list_lock, &mut irqL);
+	}
+	if backup_oper_channel == 0 {
+    return;
+} else {
+		SelectChannel(padapter, backup_oper_channel);
+}
+}
+associated_clients_update(padapter, updated);
 }
 
-pub fn add_RATid(padapter &mut Adapter, psta &mut StaInfo, rssi_level u8) -> Result {
 	
