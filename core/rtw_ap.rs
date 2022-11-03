@@ -23,6 +23,7 @@ use core::mem::transmute;
 use core::mem::zeroed;
 use core::ptr::null_mut;
 use core::ptr::null;
+use core::mem::sizeof;
 use core::ptr::write_volatile;
 use core::ptr::read_volatile;
 use core::slice::from_raw_parts;
@@ -336,15 +337,6 @@ pub fn chk_sta_is_alive(psta: &mut sta_info) -> u8 {
 
 	//if(sta_last_rx_pkts(psta) == sta_rx_pkts(psta))
 	if (psta.sta_stats.last_rx_data_pkts + psta.sta_stats.last_rx_ctrl_pkts) == (psta.sta_stats.rx_data_pkts + psta.sta_stats.rx_ctrl_pkts) {
-		/*port from C, using conditional compilation 
-		#if 0
-		if(psta->state&WIFI_SLEEP_STATE)
-			ret = _TRUE;
-		#endif
-	} else {
-		ret = _TRUE;
-	}
-	*/
 	#[cfg(not(feature = "CONFIG_LPS"))]
 	{
 		ret = _TRUE;
@@ -423,8 +415,6 @@ pub fn rtw_ap_expire_timeout_chk(padapter: &mut Adapter) {
 		DBG_871X("asoc_list len = %d\n", pstapriv.asoc_list_cnt);
 	}
 }
-/*port from C to Rust: 
-*/
 	psta = container_of!(plist, sta_info, asoc_list);
 	plist = get_next(plist);
 
@@ -558,4 +548,288 @@ issue null data to check sta alive.
 associated_clients_update(padapter, updated);
 }
 
+pub fn add_RATid(padapter: &mut Adapter, psta: &mut StaInfo, rssi_level: u8) {
+	let mut i = 0;
+	let rf_type = 0;
+	let init_rate = 0;
+	let sta_band = 0;
+	let raid = 0;
+	let shortGIrate = false;
+	let limit = 0;
+	let mut tx_ra_bitmap = 0;
+	let psta_ht = &mut psta.htpriv;
+	let pmlmepriv = &padapter.mlmepriv;
+	let pcur_network = &pmlmepriv.cur_network.network;
+
+	#[cfg(feature = "CONFIG_80211N_HT")]{
+	if !psta {
+		return;
+	}
+
+	if (psta.state & _FW_LINKED) == 0 {
+		return;
+	}
+	// b/g mode ra_bitmap
+	for i in 0..psta.bssrateset.len() {
+		if psta.bssrateset[i] != 0 {
+			tx_ra_bitmap |= rtw_get_bit_value_from_ieee_value(psta.bssrateset[i] & 0x7f);
+		}
+	}
+}
+#[cfg(feature = "CONFIG_80211N_HT")]{
+	#[cfg(feature = "CONFIG_80211AC_VHT")]{
+	if psta.vhtpriv.vht_option {
+		let mut vht_bitmap = 0;
+		vht_bitmap = rtw_vht_rate_to_bitmap(psta.vhtpriv.vht_mcs_map);
+		tx_ra_bitmap |= (vht_bitmap << 12);
+		shortGIrate = psta.vhtpriv.sgi;
+	}
+	}
+	if #[cfg(not feature = "CONFIG_80211AC_VHT")] && psta_ht.ht_option {		
+			let rf_type = rtw_hal_get_hwreg(padapter, HW_VAR_RF_TYPE);
+			if rf_type == RF_2T2R {
+				limit = 16; // 2R
+			} else {
+				limit = 8; //  1R
+			}
+			for i in 0..limit {
+				if psta_ht.ht_cap.supp_mcs_set[i / 8] & BIT(i % 8) {
+					tx_ra_bitmap |= BIT(i + 12);
+				}
+			}
+			shortGIrate = psta_ht.sgi;
 	
+
+	}
+}
+if pcur_network.Contiguration.DSConfig > 14 {
+	#[cfg(feature = "CONFIG_80211AC_VHT")]{
+		if psta.vhtpriv.vht_option {
+			sta_band = WIRELESS_11_5AC;	
+	}
+}
+if !psta.vhtpriv.vht_option {
+	if tx_ra_bitmap & 0xffff000 {
+		sta_band |= WIRELESS_11_5N | WIRELESS_11A;
+	} else {
+		sta_band = WIRELESS_11A;
+	}
+}
+if tx_ra_bitmap & 0xffff000 {
+	sta_band |= WIRELESS_11_24N | WIRELESS_11G | WIRELESS_11B;
+} else 		if tx_ra_bitmap & 0xff0 {
+	sta_band |= WIRELESS_11G | WIRELESS_11B;
+} else {
+	sta_band = WIRELESS_11B;
+}
+psta.wireless_mode = sta_band;
+raid = rtw_hal_networktype_to_raid(padapter, sta_band);
+
+init_rate = get_highest_rate_idx(tx_ra_bitmap) & 0x3f;
+
+if psta.aid < NUM_STA {
+	arg[4] = u8 {0};
+	arg[0] = psta.mac_id;
+	arg[1] = raid;
+	arg[2] = shortGIrate;
+	arg[3] = init_rate;
+
+	DBG_871X("%s=> mac_id:%d , raid:%d , shortGIrate =%d, bitmap=0x%x\n", __FUNCTION__, psta.mac_id, raid, shortGIrate, tx_ra_bitmap);
+	rtw_hal_add_ra_tid(padapter, tx_ra_bitmap, arg, rssi_level);
+
+	if shortGIrate == true {
+		init_rate |= BIT(6);
+		psta.raid = raid;
+		psta.init_rate = init_rate;
+	}
+}
+else {
+	DBG_871x("station aid %d exceed the max number\n", psta.aid);
+}
+}
+}
+
+fn update_bmc_sta(padapter: &mut _adapter) {
+	let mut irqL: irqL;
+	let mut init_rate: u32 = 0;
+	let mut network_type: u8;
+	let mut raid: u8;
+	let mut i: i32;
+	let mut supportRateNum: i32 = 0;
+	let mut tx_ra_bitmap: u32 = 0;
+	let pmlmepriv: &mut mlme_priv = &mut padapter.mlmepriv;
+	let pmlmeext: &mut mlme_ext_priv = &mut padapter.mlmeextpriv;
+	let pmlmeinfo: &mut mlme_ext_info = &mut pmlmeext.mlmext_info;
+	let pcur_network: &mut WLAN_BSSID_EX = &mut pmlmepriv.cur_network.network;
+	let psta: &mut sta_info = rtw_get_bcmc_stainfo(padapter);
+
+	if psta {
+		psta.aid = 0; // default set to 0
+		// psta->mac_id = psta->aid+4;
+		psta.mac_id = psta.aid + 1; // mac_id=1 for bc/mc stainfo
+
+		pmlmeinfo.FW_sta_info[psta.mac_id].psta = psta;
+
+		psta.qos_option = 0;
+		#[cfg(CONFIG_80211N_HT)]
+		{
+			psta.htpriv.ht_option = false;
+		}
+		psta.ieee8021x_blocked = 0;
+
+		_rtw_memset((psta.sta_stats as *mut u8), 0, size_of::<stainfo_stats>());
+
+		//prepare for add_RATid
+		supportRateNum = rtw_get_rateset_len(pcur_network.SupportedRates.as_mut_ptr());
+		network_type = rtw_check_network_type(
+			pcur_network.SupportedRates.as_mut_ptr(),
+			supportRateNum,
+			1,
+		);
+
+		__rtw_memcpy(psta.bssrateset.as_mut_ptr(), &pcur_network.SupportedRates, supportRateNum);
+		psta.bssratelen = supportRateNum;
+
+		//b/g mode ra_bitmap
+		i = 0;
+		while i < supportRateNum {
+			if psta.bssrateset[i] != 0 {
+				tx_ra_bitmap |= rtw_get_bit_value_from_ieee_value(psta.bssrateset[i] & 0x7f);
+			}
+			i += 1;
+		}
+		if pcur_network.Configuration.DSConfig > 14 {
+			//force to A mode. 5G doesn't support CCK rates
+			network_type = WIRELESS_11A;
+			tx_ra_bitmap = 0x150; //6, 12, 24 Mbps
+		} else {
+			//force to b mode
+			network_type = WIRELESS_11B;
+			tx_ra_bitmap = 0xf;
+		}
+
+		raid = rtw_hal_networktype_to_raid(padapter, network_type);
+
+		init_rate = get_highest_rate_idx(tx_ra_bitmap & 0x0fffffff) & 0x3f;
+
+		rtw_hal_set_odm_var(padapter, HAL_ODM_STA_INFO, psta, _TRUE);
+		if pHalData.fw_ractrl == _TRUE {
+			let mut arg: [u8; 4] = [0; 4];
+
+			arg[0] = psta.mac_id;
+			arg[1] = raid;
+			arg[2] = 0;
+			arg[3] = init_rate;
+
+			DBG_871X("%s=> mac_id:%d , raid:%d , bitmap=0x%x\n",
+					 __FUNCTION__, psta.mac_id, raid, tx_ra_bitmap);
+
+			rtw_hal_add_ra_tid(padapter, tx_ra_bitmap, &mut arg, 0);
+	}
+	//set ra_id, init_rate
+	psta.raid = raid;
+	psta.init_rate = init_rate;
+
+	rtw_stassoc_hw_rpt(padapter, psta);
+
+	_enter_critical_bh(&psta.lock, &irqL);
+	psta.state = _FW_LINKED;
+	_exit_critical_bh(&psta.lock, &irqL);
+	} else {
+		DBG_871X("add_RATid_bmc_sta error!\n");
+	}
+}
+
+fn update_sta_info_apmode(padapter: &mut _adapter) {
+	let _irqL: irqL;
+	let pmlmepriv: &mut mlme_priv = &mut padapter.mlmepriv;
+	let psecuritypriv: &mut security_priv = &mut padapter.securitypriv;
+	let pmlmeext: &mut mlme_ext_priv = &mut padapter.mlmeextpriv;
+	#[cfg(CONFIG_80211N_HT)]{
+	let phtpriv_ap: &mut ht_priv = &mut pmlmepriv.htpriv;
+	let phtpriv_sta: &mut ht_priv = &mut psta.htpriv;
+	}
+	DBG_871X("%s\n", __FUNCTION__);
+
+	//ap mode
+	rtw_hal_set_odm_var(padapter, HAL_ODM_STA_INFO, psta, true);
+
+	if psecuritypriv.dot11AuthAlgrthm == dot11AuthAlgrthm_8021X {
+		psta.ieee8021x_blocked = true;
+		psta.dot118021XPrivacy = psecuritypriv.dot11PrivacyAlgrthm;
+	} else {
+		psta.ieee8021x_blocked = false;
+	}
+	VCS_update(padapter, psta);
+	#[cfg(CONFIG_80211N_HT)]{
+		if phtpriv_sta.ht_option {
+			//check if sta supports rx ampdu
+			phtpriv_sta.ampdu_enable = phtpriv_ap.ampdu_enable;
+
+			//check if sta supports s Short GI
+			if phtpriv_sta.ht_cap.cap_info & phtpriv_ap.ht_cap.cap_info & IEEE80211_HT_CAP_SGI_20 {
+				phtpriv_sta.sgi = true;
+			}
+			if phtpriv_sta.ht_cap.cap_info & phtpriv_ap.ht_cap.cap_info & IEEE80211_HT_CAP_SGI_40 {
+				phtpriv_sta.sgi = true;
+				
+			}
+			// bwmode
+			if phtpriv_sta.ht_cap.cap_info & phtpriv_ap.ht_cap.cap_info & IEEE80211_HT_CAP_SUP_WIDTH {
+			phtpriv_sta.bwmode = pmlmeext.cur_bwmode;
+			phtpriv_sta.ch_offset = pmlmeext.cur_ch_offset;
+		}
+		psta.qos_option = true;
+		}
+		else {
+			phtpriv_sta.ampdu_enable = false;
+			phtpriv_sta.sgi = false;
+			phtpriv_sta.bwmode = CHANNEL_WIDTH_20;
+			phtpriv_sta.ch_offset = HAL_PRIME_CHNL_OFFSET_DONT_CARE;
+		}
+		//Rx AMPDU
+		send_delba(padapter, 0, psta.hwaddr);// recipient
+
+		//TX AMPDU
+		send_delba(padapter, 1, psta.hwaddr);   // originator
+		phtpriv_sta.agg_enable_bitmap = 0x0;    // reset
+		phtpriv_sta.candidate_tid_bitmap = 0x0; // reset
+}
+#[cfg(CONFIG_80211AC_VHT)]{
+	update_sta_vht_info_apmode(padapter, psta);
+}
+
+//todo: init other variables
+psta.sta_stats = stainfo_stats::default();
+
+enter_critical_bh(&psta.lock, &irqL);
+psta.state = FW_LINKED;
+exit_critical_bh(&psta.lock, &irqL);
+
+}
+
+fn update_hw_ht_param(padapter: &mut _adapter) {
+	let max_AMPDU_len: u8;
+	let min_MPDU_spacing: u8;
+	let pregpriv: &mut registry_priv = &mut padapter.registrypriv;
+	let pmlmeext: &mut mlme_ext_priv = &mut padapter.mlmeextpriv;
+	let pmlmeinfo: &mut mlme_ext_info = &mut pmlmeext.mlmext_info;
+
+	DBG_871X("%s\n", FUNCTION);
+
+	max_AMPDU_len = pmlmeinfo.HT_caps.u.HT_cap_element.ampdu_params_info & 0x03;
+
+	min_MPDU_spacing = (pmlmeinfo.HT_caps.u.HT_cap_element.ampdu_params_info & 0x1c) >> 2;
+
+	rtw_hal_set_hwreg(padapter, HW_VAR_AMPDU_MIN_SPACE, &min_MPDU_spacing);
+
+	rtw_hal_set_hwreg(padapter, HW_VAR_AMPDU_FACTOR, &max_AMPDU_len);
+
+	//Config SM Power Save setting
+
+	pmlmeinfo.SM_PS = (pmlmeinfo.HT_caps.u.HT_cap_element.HT_caps_info & 0x0C) >> 2;
+
+	if pmlmeinfo.SM_PS == WLAN_HT_CAP_SM_PS_STATIC {
+		DBG_871X("%s(): WLAN_HT_CAP_SM_PS_STATIC\n", FUNCTION);
+	}
+}
