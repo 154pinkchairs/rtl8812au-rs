@@ -8,3 +8,8 @@ modules.order
 *.mod
 8812au.mod.c
 .8812au.mod.cmd
+
+
+# Added by cargo
+
+/target
