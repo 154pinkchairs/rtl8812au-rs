@@ -4,7 +4,7 @@
 ## Realtek 802.11ac (rtl8812au)
 
 This is a fork of the Realtek 802.11ac (rtl8812au) v4.2.2 (7502.20130507)
-driver altered to build on Linux kernel version >= 3.10. This branch, as the name suggests, was created to gradually rewrite code in Rust.
+driver altered to build on Linux kernel version >= 3.10, that is being currently rewritten into Rust as a proof of concept.
 
 ### Purpose
 
